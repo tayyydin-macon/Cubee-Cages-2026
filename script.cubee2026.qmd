@@ -1,26 +1,132 @@
----
-title: "Script.Cubee2026"
-format: html
-editor: visual
----
+```{r setup, include = F}
+# @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+# @@@@@ Knitr Options
+# @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
-## Quarto
+# Set root directory to the project directory
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
 
-## Running Code
+# Set default knitr options: 
+# Suppress warnings and messages, cache chunks, 
+#  set default figure size to 6x8 at 300 dpi, and save a png and pdf
+knitr::opts_chunk$set(warning = F, message = F, collapse = T, cache = T,
+    fig.height = 6, fig.width = 8, dpi = 300, # 6x8" @ 300dpi:1800x2400=4.3MP
+    dev = c('png', 'pdf'), dev.args = list(pdf = list(onefile = F)))
 
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
-```{r}
-1 + 1
 ```
 
-You can add options to executable code like this
-
+overdispersion test
 ```{r}
-#| echo: false
-2 * 2
+overdispersion_test <- function(model, type = "pearson"){
+    
+    # Get the pearson residuals
+    residuals <- resid(model, type = type)
+    
+    # Get the residual degrees of freedom of the model
+    df <- df.residual(model)
+    
+    # Sum of residual deviance
+    dev <- sum(residuals ^ 2)
+    
+    # Overdispersion = sum of squared residuals / residual degrees of freedom
+    ratio <- round(dev / df, 3)
+    
+    # P-value 
+    pvalue <- round(pchisq(dev, df, lower.tail = FALSE), 3)
+    
+    # Get the formula
+    f = paste(as.character(formula(model))[2:3], collapse = " ~ ")
+    
+    # Get the model name
+    name <- deparse(substitute(model))
+    cat("Overdispersion ratio for model:", name, "\nformula:", f, 
+        "\n\nAcceptable range: 1 - 1.4\nOverdispersion ratio:",
+        ratio, " df:", df, " p =", pvalue, "\n", 
+        ifelse(pvalue < 0.05, "Data are OVERDISPERSED\n", 
+        "Data are NOT OVERDISPERSED\n"))
+    # Return all the parameters
+    return(c(ratio = ratio, deviance = dev, df = df, pvalue = pvalue))
+    
+}
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+
+
+loading in packages
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(metafor)
+library(VGAM)
+library(sjPlot)
+library(lme4)
+library(car)
+library(emmeans)
+library(lubridate)
+library(glmmTMB)
+
+```
+loading in data
+
+```{r}
+
+data <- read.csv("Data/cubee2026.csv")
+
+
+```
+subtracting mortality, adding day column, and obs 
+```{r}
+dat <- data %>%
+  mutate(
+    Date = mdy(Date),
+    NDB = as.numeric(NDB),
+    TotalM = as.numeric(TotalM)
+  ) %>%
+  arrange(CageID, Date) %>%
+  group_by(CageID) %>%
+  mutate(
+    TotalM_cage = first(na.omit(TotalM)),
+    TotalD = cumsum(replace_na(NDB, 0)),
+    Alive = TotalM_cage - TotalD,
+    Day = as.numeric(Date - min(Date, na.rm = TRUE)),
+   obs_ID = factor(dplyr::row_number())) %>%
+  ungroup() %>%
+  select(-TotalM_cage)
+
+```
+models
+```{r}
+
+#cumulative survival
+mod1 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment* Day +
+                  (1 | CageID) + (1 | obs_ID),
+            family = binomial(), data = dat) 
+
+overdispersion_test(mod1) 
+
+mod2 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment* Date +
+                  (1 | CageID) + (1 | obs_ID),
+            family = betabinomial(link = "logit")
+            , data = dat) 
+
+overdispersion_test(mod2) # overdispersed
+
+#daily survival
+mod3 <-  glmmTMB(cbind(Alive + NDB, NDB) ~ Treatment* Day +
+                  (1 | CageID) + (1 | obs_ID),
+            family = binomial(), data = dat) 
+
+overdispersion_test(mod3) 
+
+```
+
+plotting model
+```{r}
+plot_model(mod1, type = "pred",
+           terms = c("Day", "Treatment"),
+           title = "") +
+  labs(x = "Day", y = "Pr(Bee Survival)", color = "Treatment") +
+  theme_minimal(base_size = 16)
+```
