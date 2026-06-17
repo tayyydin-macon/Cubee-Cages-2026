@@ -82,7 +82,8 @@ dat <- data %>%
   mutate(
     Date = mdy(Date),
     NDB = as.numeric(NDB),
-    TotalM = as.numeric(TotalM)
+    TotalM = as.numeric(TotalM),
+    Treatment = as.factor(Treatment)
   ) %>%
   arrange(CageID, Date) %>%
   group_by(CageID) %>%
@@ -91,8 +92,11 @@ dat <- data %>%
     TotalD = cumsum(replace_na(NDB, 0)),
     Alive = TotalM_cage - TotalD,
     Day = as.numeric(Date - min(Date, na.rm = TRUE)),
-   obs_ID = factor(dplyr::row_number())) %>%
+   Risk = as.numeric(Alive + NDB),
+   logRisk = log(Risk)) %>%
+  filter(!is.na(logRisk)) %>%
   ungroup() %>%
+    mutate(obs_ID = factor(dplyr::row_number())) %>%
   select(-TotalM_cage)
 
 ```
@@ -100,33 +104,66 @@ models
 ```{r}
 
 #cumulative survival
-mod1 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment* Day +
+mod1 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment * Day +
                   (1 | CageID) + (1 | obs_ID),
             family = binomial(), data = dat) 
 
 overdispersion_test(mod1) 
 
-mod2 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment* Date +
-                  (1 | CageID) + (1 | obs_ID),
-            family = betabinomial(link = "logit")
-            , data = dat) 
 
-overdispersion_test(mod2) # overdispersed
+mod2 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment* Day +
+                  (1 | obs_ID),
+            family = binomial(), data = dat) 
 
-#daily survival
-mod3 <-  glmmTMB(cbind(Alive + NDB, NDB) ~ Treatment* Day +
+overdispersion_test(mod2)
+
+mod3 <- glmmTMB(cbind(Alive, TotalD) ~ Treatment + Day +
                   (1 | CageID) + (1 | obs_ID),
             family = binomial(), data = dat) 
 
-overdispersion_test(mod3) 
+overdispersion_test(mod3)
 
+mod4 <- glmmTMB(cbind(Alive, TotalD) ~ Treatment + Day +
+                  (1 | obs_ID),
+            family = binomial(), data = dat) 
+
+overdispersion_test(mod4)
+
+AIC(mod1,mod2, mod3, mod4) #mod1 is a better model
 ```
 
 plotting model
 ```{r}
 plot_model(mod1, type = "pred",
-           terms = c("Day", "Treatment"),
+           terms = c("Day [all]", "Treatment"),
            title = "") +
   labs(x = "Day", y = "Pr(Bee Survival)", color = "Treatment") +
   theme_minimal(base_size = 16)
+
+summary(mod1)
+car::Anova(mod1)
 ```
+
+
+model summary and post-hoc tests
+```{r}
+summary(mod1)
+car::Anova(mod1)
+
+library(emmeans)
+
+emm_day <- emmeans(
+  mod1,
+  ~ Treatment | Day,
+  at = list(Day = c(0:28)),
+  type = "response"
+)
+
+emm_day
+```
+
+
+
+
+
+
