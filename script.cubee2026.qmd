@@ -162,6 +162,85 @@ emm_day <- emmeans(
 emm_day
 ```
 
+reduced dataset
+```{r}
+
+datre <- dat %>% 
+  filter(dat$Day <= 28)
+
+```
+
+model for datre
+
+``` {r}
+mod5 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment * Day +
+                  (1 | CageID) + (1 | obs_ID),
+            family = binomial(), data = datre) 
+
+mod6 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment * Day ,
+            family = binomial(), data = datre) 
+
+mod7 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment * Day +
+                  (1 | CageID) ,
+            family = binomial(), data = datre) 
+
+mod8 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment * Day +
+                   (1 | obs_ID),
+            family = binomial(), data = datre) 
+
+overdispersion_test(mod5) #BEST AIC
+overdispersion_test(mod6) #over
+overdispersion_test(mod7) #over
+overdispersion_test(mod8)
+AIC(mod5, mod6, mod7, mod8)
+
+```
+
+plotting model mod5
+```{r}
+plot_model(mod5, type = "pred",
+           terms = c("Day [all]", "Treatment"),
+           title = "") +
+  labs(x = "Day", y = "Pr(Bee Survival)", color = "Treatment") +
+  theme_minimal(base_size = 16)
+
+summary(mod1)
+car::Anova(mod1)
+```
+
+
+model summary and post-hoc tests
+```{r}
+summary(mod5)
+car::Anova(mod5)
+
+library(emmeans)
+
+emm_dayre <- emmeans(
+  mod5,
+  ~ Treatment | Day,
+  at = list(Day = c(0:28)),
+  type = "response"
+)
+
+emm_dayre
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
