@@ -166,7 +166,7 @@ reduced dataset
 ```{r}
 
 datre <- dat %>% 
-  filter(dat$Day <= 28)
+  filter(dat$Day <= 23)
 
 ```
 
@@ -219,7 +219,7 @@ library(emmeans)
 emm_dayre <- emmeans(
   mod5,
   ~ Treatment | Day,
-  at = list(Day = c(0:28)),
+  at = list(Day = c(0:23)),
   type = "response"
 )
 
