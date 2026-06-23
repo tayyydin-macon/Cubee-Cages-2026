@@ -59,13 +59,17 @@ library(tidyverse)
 library(ggplot2)
 library(readr)
 library(metafor)
-library(VGAM)
 library(sjPlot)
 library(lme4)
 library(car)
 library(emmeans)
 library(lubridate)
 library(glmmTMB)
+
+# added these libraries:
+library(brms)
+library(tidybayes)
+library(viridis)
 
 ```
 loading in data
@@ -77,7 +81,7 @@ data <- read.csv("Data/cubee2026.csv")
 
 ```
 subtracting mortality, adding day column, and obs 
-```{r}
+```{r data_wrangling, echo = F}
 dat <- data %>%
   mutate(
     Date = mdy(Date),
@@ -88,6 +92,7 @@ dat <- data %>%
   arrange(CageID, Date) %>%
   group_by(CageID) %>%
   mutate(
+    CageID = factor(CageID),
     TotalM_cage = first(na.omit(TotalM)),
     TotalD = cumsum(replace_na(NDB, 0)),
     Alive = TotalM_cage - TotalD,
@@ -96,7 +101,13 @@ dat <- data %>%
    logRisk = log(Risk)) %>%
   filter(!is.na(logRisk)) %>%
   ungroup() %>%
-    mutate(obs_ID = factor(dplyr::row_number())) %>%
+    mutate(obs_ID = factor(dplyr::row_number()),
+           NBE = as.numeric(NBE),
+           cens_count = case_when(
+             Day == 14 ~ NBE + 10,
+             Day == 21 ~ NBE + 10, 
+             TRUE ~ NBE
+           )) %>%
   select(-TotalM_cage)
 
 ```
@@ -105,11 +116,12 @@ models
 
 #cumulative survival
 mod1 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment * Day +
-                  (1 | CageID) + (1 | obs_ID),
-            family = binomial(), data = dat) 
+                  (1 | CageID),
+            family = binomial(link = "logit"), data = dat) 
 
 overdispersion_test(mod1) 
-
+plot_model(mod1, type = "pred",
+           terms = c("Day", "Treatment"))
 
 mod2 <-  glmmTMB(cbind(Alive, TotalD) ~ Treatment* Day +
                   (1 | obs_ID),
@@ -227,22 +239,228 @@ emm_dayre
 ```
 
 
+```{r plots_and_curves, echo = F}
+
+# When is the inflection point?
+dat %>% 
+  filter(Treatment == "A" | 
+           Treatment == "C") %>% 
+  ggplot(aes(x = Day, y = logRisk, color = Treatment)) +
+  geom_point() +
+  geom_smooth(method = "lm",
+              formula = y ~ poly(x, 2))
+## inflection --- around day 21-23
+
+```
+
+# Bayesian Survival Model
+
+```{r bayes_surv_mods, echo = F}
+
+# get the starting number of bees in each cage:
+dat1 <- dat %>% 
+  group_by(CageID, Treatment) %>% 
+  summarise(total_escape = sum(NBE, na.rm = T)) %>% 
+  mutate(total_cens = total_escape + 20) %>% 
+  right_join(., dat, by = c("CageID", "Treatment")) %>% 
+  mutate(Alive = Alive + total_cens) %>% 
+  select(Day, CageID, Treatment, Alive, total_cens, total_escape) %>% 
+  group_by(CageID, Treatment) %>% 
+  summarise(n_start = max(Alive, na.rm = T))
+
+# calculate the number of at risk bees in each time step:
+dat2 <- dat %>% left_join(dat1, by = c("CageID", "Treatment")) %>% 
+  mutate(NBE = ifelse(is.na(NBE), 0, NBE)) %>% 
+  arrange(CageID, Day) %>% 
+  group_by(CageID) %>% 
+  mutate(n_atrisk = n_start - cumsum(lag(NDB, default = 0)) -
+           cumsum(lag(NBE, default = 0))) %>% 
+  ungroup()
+
+# Discrete-time hazard model:
+mod1_surv <- brm(
+  formula = NDB | trials(n_atrisk) ~ 
+    Treatment * splines::ns(Day, df = 3) +
+    (1 | CageID),
+  family = beta_binomial(link = "logit"),
+  data = dat2,
+  cores = 4,
+  chains = 4,
+  prior = c(
+    prior(normal(0, 1.5), class = b),
+    prior(normal(-3, 1), class = Intercept),
+    prior(exponential(1), class = sd)
+  ),
+  file = "Models/mod1_surv"
+)
+
+summary(mod1_surv)
+
+## overdispersion is not really an issue with beta_binomial, but check:
+pp_check(mod1_surv, ndraws = 100)
+## ^^^^ Observed data (black line) falls in the predicted variance envelope
 
 
 
+```
+
+## Visualize the results
+```{r predicted_survival_curves_prep, echo = F}
+
+# Build a prediction grid over the observed day range
+days <- seq(min(dat2$Day), max(dat2$Day), by = 1)
+treatments <- levels(dat2$Treatment)
+
+pred_grid <- expand.grid(Day = days,
+                         Treatment = treatments) %>%
+  mutate(CageID = NA, # marginal over random effect
+         n_atrisk = 1000
+         # arbitrary number; we want the probability, not counts
+  )
+
+# Posterior draws of the per-day hazard (probability scale)
+hazard_draws <- pred_grid %>% 
+  add_epred_draws(mod1_surv, re_formula = NA, ndraws = 500) %>% 
+  mutate(hazard = .epred / 1000)
+
+```
+
+### Per-day hazard by treatment
+```{r hazards_by_treatment, echo = F}
+
+hazard_draws %>% 
+  group_by(Day, Treatment) %>% 
+  median_qi(hazard, .width = 0.89) %>% 
+  ggplot(aes(x = Day, y = hazard,
+             color = Treatment,
+             fill = Treatment)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+              alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1) +
+  labs(y = "Per-day probability of death",
+       x = "Day") +
+  scale_colour_viridis_d(option = "D") +
+  scale_fill_viridis_d(option = "D") +
+  theme_classic()
+
+```
+
+### Survival curves
+```{r survival_curves, echo = F}
+
+survival_draws <- hazard_draws %>% 
+  arrange(Treatment, .draw, Day) %>% 
+  group_by(Treatment, .draw) %>% 
+  mutate(survival = cumprod(1 - hazard)) %>% 
+  ungroup()
+
+survival_draws %>% 
+  group_by(Day, Treatment) %>% 
+  median_qi(survival, .width = 0.89) %>% 
+  ggplot(aes(x = Day, y = survival,
+             color = Treatment,
+             fill = Treatment)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+              alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1),
+                     labels = scales::percent) +
+  labs(y = "Survival probability", x = "Day") +
+  scale_colour_viridis_d(option = "D") +
+  scale_fill_viridis_d(option = "D") +
+  theme_classic()
 
 
+```
 
 
+## Contrast-based hypothesis testing
+
+We'll use the restricted mean survival time, RMST to compare the area under the survival curves across treatments.
+
+```{r RMST_contrasts, echo = F}
+
+days <- sort(unique(dat2$Day))
+
+treatments <- levels(dat2$Treatment)
+
+pred_grid <- expand.grid(Day = days,
+                         Treatment = treatments) %>% 
+  mutate(CageID = NA, n_atrisk = 1000)
+
+# Get hazard draws
+hazard_draws <- pred_grid %>% 
+  add_epred_draws(mod1_surv, re_formula = NA, ndraws = 2000) %>% 
+  mutate(hazard = .epred / 1000)
+
+# Convert to survival, then compute RMST as sum of survival over days
+# (discrete-time RMST = sum of S(t) across all time points)
+rmst_draws <- hazard_draws %>% 
+  arrange(Treatment, .draw, Day) %>% 
+  group_by(Treatment, .draw) %>% 
+  summarise(RMST = sum(cumprod(1 - hazard)),
+            .groups = "drop")
+
+###################################
+# contrasts:
+
+rmst_wide <- rmst_draws %>% 
+  pivot_wider(names_from = Treatment, values_from = RMST)
+
+contrasts <- rmst_wide %>% 
+  mutate(
+    # key hypotheses
+    A_vs_C = A - C, # is A better than C?
+    A_vs_B = A - B,
+    C_vs_B = C - B,
+    B_vs_D = B - D,
+    B_vs_E = B - E,
+    D_vs_E = D - E # are D and E actually distinguishable?
+  )
+
+# Summarize each contrast
+contrasts %>% 
+  select(-A, -B, -C, -D, -E) %>%
+  pivot_longer(cols = c(A_vs_C : D_vs_E),
+               names_to = "contrast",
+               values_to = "diff") %>% 
+  group_by(contrast) %>% 
+  median_qi(diff, .width = 0.95) %>% 
+  mutate(across(where(is.numeric), round, 2))
+
+```
+
+```{r probability_of_direction, echo = F}
+
+contrasts %>% 
+  summarise(
+    p_A_gt_C = mean(A_vs_C > 0),
+    p_A_gt_B = mean(A_vs_B > 0),
+    p_C_gt_B = mean(C_vs_B > 0),
+    p_B_gt_D = mean(B_vs_D > 0),
+    p_B_gt_E = mean(B_vs_E > 0),
+    p_D_gt_E = mean(D_vs_E > 0)
+  ) %>% 
+  pivot_longer(everything(),
+               names_to = "contrast",
+               values_to = "P(direction)")
+
+```
+
+### Contrast plot
+```{r contrast_plot, echo = F}
+
+contrasts %>% 
+  pivot_longer(-c(.draw,A,B,C,D,E),
+               names_to = "contrast",
+               values_to = "diff") %>% 
+  ggplot(aes(x = diff, y = contrast)) +
+  stat_halfeye(.width = c(0.89, 0.95)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(x = "Difference in RMST (days)", y = NULL) +
+  theme_classic()
 
 
-
-
-
-
-
-
-
-
+```
 
 
