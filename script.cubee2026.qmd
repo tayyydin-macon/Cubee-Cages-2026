@@ -300,8 +300,6 @@ summary(mod1_surv)
 pp_check(mod1_surv, ndraws = 100)
 ## ^^^^ Observed data (black line) falls in the predicted variance envelope
 
-
-
 ```
 
 ## Visualize the results
